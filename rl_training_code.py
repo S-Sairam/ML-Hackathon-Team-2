@@ -6,8 +6,103 @@ This notebook implements and trains the RL agent using Q-learning/DQN
 import numpy as np
 import random
 import pickle
-from collections import defaultdict, deque
+from collections import defaultdict, deque, Counter
 import matplotlib.pyplot as plt
+
+# ============================================================================
+# PART 0: HMM CLASS (needed for loading pickled models)
+# ============================================================================
+
+class HangmanHMM:
+    """
+    Hidden Markov Model for Hangman letter prediction
+    (Copy of class from HMM training for pickle compatibility)
+    """
+    
+    def __init__(self, word_length):
+        self.word_length = word_length
+        self.alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+        self.letter_to_idx = {letter: i for i, letter in enumerate(self.alphabet)}
+        self.emission_probs = np.zeros((word_length, 26))
+        self.transition_probs = np.eye(word_length)
+        self.bigram_counts = {}
+        self.bigram_probs = {}
+    
+    def train(self, words):
+        """Train HMM on words of specific length"""
+        position_counts = [Counter() for _ in range(self.word_length)]
+        
+        for word in words:
+            if len(word) != self.word_length:
+                continue
+            for pos, letter in enumerate(word):
+                position_counts[pos][letter] += 1
+            for i in range(len(word) - 1):
+                if word[i] not in self.bigram_counts:
+                    self.bigram_counts[word[i]] = {}
+                if word[i+1] not in self.bigram_counts[word[i]]:
+                    self.bigram_counts[word[i]][word[i+1]] = 0
+                self.bigram_counts[word[i]][word[i+1]] += 1
+        
+        alpha = 0.5
+        for pos in range(self.word_length):
+            total = sum(position_counts[pos].values()) + alpha * 26
+            for letter in self.alphabet:
+                count = position_counts[pos][letter] + alpha
+                letter_idx = self.letter_to_idx[letter]
+                self.emission_probs[pos][letter_idx] = count / total
+        
+        for letter1 in self.bigram_counts:
+            total = sum(self.bigram_counts[letter1].values()) + alpha * 26
+            self.bigram_probs[letter1] = {}
+            for letter in self.alphabet:
+                count = self.bigram_counts[letter1].get(letter, 0) + alpha
+                self.bigram_probs[letter1][letter] = count / total
+    
+    def predict_letter_probs(self, masked_word, guessed_letters):
+        """Predict probability distribution over letters"""
+        if len(masked_word) != self.word_length:
+            remaining = [l for l in self.alphabet if l not in guessed_letters]
+            uniform_prob = 1.0 / len(remaining) if remaining else 0
+            return {l: uniform_prob for l in remaining}
+        
+        letter_scores = defaultdict(float)
+        blank_positions = [i for i, c in enumerate(masked_word) if c == '_']
+        
+        if not blank_positions:
+            return {}
+        
+        for pos in blank_positions:
+            for letter_idx, letter in enumerate(self.alphabet):
+                if letter in guessed_letters:
+                    continue
+                
+                prob = self.emission_probs[pos][letter_idx]
+                
+                if pos > 0 and masked_word[pos-1] != '_':
+                    left_letter = masked_word[pos-1]
+                    if left_letter in self.bigram_probs:
+                        bigram_prob = self.bigram_probs[left_letter].get(letter, 0)
+                        prob *= (1 + bigram_prob * 2)
+                
+                if pos < len(masked_word) - 1 and masked_word[pos+1] != '_':
+                    right_letter = masked_word[pos+1]
+                    if letter in self.bigram_probs:
+                        bigram_prob = self.bigram_probs[letter].get(right_letter, 0)
+                        prob *= (1 + bigram_prob * 2)
+                
+                letter_scores[letter] += prob
+        
+        total = sum(letter_scores.values())
+        if total > 0:
+            letter_probs = {l: score/total for l, score in letter_scores.items()}
+        else:
+            remaining = [l for l in self.alphabet if l not in guessed_letters]
+            uniform_prob = 1.0 / len(remaining) if remaining else 0
+            letter_probs = {l: uniform_prob for l in remaining}
+        
+        return letter_probs
+
 
 # ============================================================================
 # PART 1: HANGMAN ENVIRONMENT

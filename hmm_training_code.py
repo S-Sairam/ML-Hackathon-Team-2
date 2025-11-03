@@ -205,7 +205,7 @@ if __name__ == "__main__":
     print("="*70)
     
     # Load corpus
-    words = load_corpus('corpus.txt')
+    words = load_corpus('Data/corpus.txt')
     
     # Group by length
     word_groups = group_words_by_length(words)

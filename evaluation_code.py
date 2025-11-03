@@ -6,26 +6,110 @@ This notebook evaluates the trained agent on 2000 test games
 import numpy as np
 import pickle
 import matplotlib.pyplot as plt
-from collections import defaultdict
+from collections import defaultdict, Counter, deque
 import seaborn as sns
+import random
 
-# Import from previous notebooks (assuming classes are available)
-# If running as standalone, copy HangmanEnvironment and HangmanQLearningAgent classes here
+# ============================================================================
+# PART 0: IMPORT CLASSES (needed for loading pickled models)
+# ============================================================================
 
+class HangmanHMM:
+    """Hidden Markov Model for Hangman letter prediction"""
+    
+    def __init__(self, word_length):
+        self.word_length = word_length
+        self.alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+        self.letter_to_idx = {letter: i for i, letter in enumerate(self.alphabet)}
+        self.emission_probs = np.zeros((word_length, 26))
+        self.transition_probs = np.eye(word_length)
+        self.bigram_counts = {}
+        self.bigram_probs = {}
+    
+    def train(self, words):
+        """Train HMM on words of specific length"""
+        position_counts = [Counter() for _ in range(self.word_length)]
+        
+        for word in words:
+            if len(word) != self.word_length:
+                continue
+            for pos, letter in enumerate(word):
+                position_counts[pos][letter] += 1
+            for i in range(len(word) - 1):
+                if word[i] not in self.bigram_counts:
+                    self.bigram_counts[word[i]] = {}
+                if word[i+1] not in self.bigram_counts[word[i]]:
+                    self.bigram_counts[word[i]][word[i+1]] = 0
+                self.bigram_counts[word[i]][word[i+1]] += 1
+        
+        alpha = 0.5
+        for pos in range(self.word_length):
+            total = sum(position_counts[pos].values()) + alpha * 26
+            for letter in self.alphabet:
+                count = position_counts[pos][letter] + alpha
+                letter_idx = self.letter_to_idx[letter]
+                self.emission_probs[pos][letter_idx] = count / total
+        
+        for letter1 in self.bigram_counts:
+            total = sum(self.bigram_counts[letter1].values()) + alpha * 26
+            self.bigram_probs[letter1] = {}
+            for letter in self.alphabet:
+                count = self.bigram_counts[letter1].get(letter, 0) + alpha
+                self.bigram_probs[letter1][letter] = count / total
+    
+    def predict_letter_probs(self, masked_word, guessed_letters):
+        """Predict probability distribution over letters"""
+        if len(masked_word) != self.word_length:
+            remaining = [l for l in self.alphabet if l not in guessed_letters]
+            uniform_prob = 1.0 / len(remaining) if remaining else 0
+            return {l: uniform_prob for l in remaining}
+        
+        letter_scores = defaultdict(float)
+        blank_positions = [i for i, c in enumerate(masked_word) if c == '_']
+        
+        if not blank_positions:
+            return {}
+        
+        for pos in blank_positions:
+            for letter_idx, letter in enumerate(self.alphabet):
+                if letter in guessed_letters:
+                    continue
+                
+                prob = self.emission_probs[pos][letter_idx]
+                
+                if pos > 0 and masked_word[pos-1] != '_':
+                    left_letter = masked_word[pos-1]
+                    if left_letter in self.bigram_probs:
+                        bigram_prob = self.bigram_probs[left_letter].get(letter, 0)
+                        prob *= (1 + bigram_prob * 2)
+                
+                if pos < len(masked_word) - 1 and masked_word[pos+1] != '_':
+                    right_letter = masked_word[pos+1]
+                    if letter in self.bigram_probs:
+                        bigram_prob = self.bigram_probs[letter].get(right_letter, 0)
+                        prob *= (1 + bigram_prob * 2)
+                
+                letter_scores[letter] += prob
+        
+        total = sum(letter_scores.values())
+        if total > 0:
+            letter_probs = {l: score/total for l, score in letter_scores.items()}
+        else:
+            remaining = [l for l in self.alphabet if l not in guessed_letters]
+            uniform_prob = 1.0 / len(remaining) if remaining else 0
+            letter_probs = {l: uniform_prob for l in remaining}
+        
+        return letter_probs
 
 
 class HangmanEnvironment:
-    """
-    Hangman game environment for RL training
-    """
+    """Hangman game environment for RL training"""
     
     def __init__(self, words, hmm_models, max_lives=6):
         self.words = words
         self.hmm_models = hmm_models
         self.max_lives = max_lives
         self.alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
-        
-        # Current game state
         self.target_word = None
         self.masked_word = None
         self.guessed_letters = None
@@ -41,14 +125,11 @@ class HangmanEnvironment:
         self.lives_left = self.max_lives
         self.game_over = False
         self.won = False
-        
         return self._get_state()
     
     def _get_state(self):
         """Get current state representation"""
-        # Get HMM predictions
         hmm_probs = self._get_hmm_probs()
-        
         state = {
             'masked_word': self.masked_word,
             'guessed_letters': self.guessed_letters.copy(),
@@ -67,19 +148,15 @@ class HangmanEnvironment:
         if word_length in self.hmm_models:
             hmm = self.hmm_models[word_length]
             probs_dict = hmm.predict_letter_probs(self.masked_word, self.guessed_letters)
-            
-            # Convert to 26-dimensional vector
             probs_vector = np.zeros(26)
             for letter, prob in probs_dict.items():
                 idx = ord(letter) - ord('A')
                 probs_vector[idx] = prob
         else:
-            # Fallback: uniform distribution over unguessed letters
             probs_vector = np.ones(26)
             for letter in self.guessed_letters:
                 idx = ord(letter) - ord('A')
                 probs_vector[idx] = 0
-            
             total = probs_vector.sum()
             if total > 0:
                 probs_vector /= total
@@ -87,55 +164,38 @@ class HangmanEnvironment:
         return probs_vector
     
     def step(self, action):
-        """
-        Take an action (guess a letter)
-        
-        Args:
-            action: str, letter to guess (A-Z)
-            
-        Returns:
-            next_state, reward, done, info
-        """
-        
+        """Take an action (guess a letter)"""
         letter = action.upper()
         
-        # Check for repeated guess
         if letter in self.guessed_letters:
-            reward = -20  # Heavy penalty for repeated guess
+            reward = -20
             return self._get_state(), reward, self.game_over, {'repeated': True}
         
         self.guessed_letters.add(letter)
         
-        # Check if letter is in word
         if letter in self.target_word:
-            # Correct guess - reveal letters
             new_masked = ""
             for i, char in enumerate(self.target_word):
                 if char == letter or self.masked_word[i] != '_':
                     new_masked += char
                 else:
                     new_masked += '_'
-            
             self.masked_word = new_masked
             
-            # Check if won
             if '_' not in self.masked_word:
                 self.game_over = True
                 self.won = True
-                reward = 100  # Big reward for winning
+                reward = 100
             else:
-                reward = 10  # Small reward for correct guess
-                
+                reward = 10
         else:
-            # Wrong guess
             self.lives_left -= 1
-            reward = -15  # Penalty for wrong guess
+            reward = -15
             
-            # Check if lost
             if self.lives_left == 0:
                 self.game_over = True
                 self.won = False
-                reward = -100  # Big penalty for losing
+                reward = -100
         
         next_state = self._get_state()
         info = {
@@ -151,35 +211,23 @@ class HangmanEnvironment:
         return [l for l in self.alphabet if l not in self.guessed_letters]
 
 
-# ============================================================================
-# PART 2: RL AGENT (Q-LEARNING WITH FUNCTION APPROXIMATION)
-# ============================================================================
-
 class HangmanQLearningAgent:
-    """
-    Q-Learning agent with state feature extraction
-    Uses approximate Q-learning with feature-based representation
-    """
+    """Q-Learning agent with state feature extraction"""
     
     def __init__(self, alpha=0.1, gamma=0.95, epsilon=1.0, epsilon_decay=0.9995, epsilon_min=0.01):
-        self.alpha = alpha  # Learning rate
-        self.gamma = gamma  # Discount factor
-        self.epsilon = epsilon  # Exploration rate
+        self.alpha = alpha
+        self.gamma = gamma
+        self.epsilon = epsilon
         self.epsilon_decay = epsilon_decay
         self.epsilon_min = epsilon_min
-        
-        # Q-table: dict mapping (state_key, action) -> Q-value
         self.q_table = defaultdict(float)
-        
         self.alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
     
     def _state_to_key(self, state):
         """Convert state dict to hashable key"""
-        # Simplified state representation for Q-table
         masked = state['masked_word']
         guessed = ''.join(sorted(state['guessed_letters']))
         lives = state['lives_left']
-        
         return f"{masked}|{guessed}|{lives}"
     
     def get_q_value(self, state, action):
@@ -188,28 +236,17 @@ class HangmanQLearningAgent:
         return self.q_table[(key, action)]
     
     def get_action(self, state, valid_actions, train=True):
-        """
-        Choose action using epsilon-greedy policy
-        
-        Args:
-            state: current state dict
-            valid_actions: list of valid actions
-            train: bool, whether in training mode
-        """
-        
+        """Choose action using epsilon-greedy policy"""
         if not valid_actions:
             return None
         
-        # Epsilon-greedy exploration
         if train and random.random() < self.epsilon:
-            # Explore: choose randomly, but weighted by HMM probabilities
             hmm_probs = state['hmm_probs']
             action_probs = []
             for action in valid_actions:
                 idx = ord(action) - ord('A')
                 action_probs.append(hmm_probs[idx])
             
-            # Normalize
             total = sum(action_probs)
             if total > 0:
                 action_probs = [p/total for p in action_probs]
@@ -217,20 +254,15 @@ class HangmanQLearningAgent:
             else:
                 action = random.choice(valid_actions)
         else:
-            # Exploit: choose best action
-            # Combine Q-values with HMM probabilities
             best_score = float('-inf')
             best_action = valid_actions[0]
-            
             hmm_probs = state['hmm_probs']
             
             for action in valid_actions:
                 q_value = self.get_q_value(state, action)
                 idx = ord(action) - ord('A')
                 hmm_prob = hmm_probs[idx]
-                
-                # Combined score: weighted sum of Q-value and HMM probability
-                score = q_value + 5 * hmm_prob  # Weight HMM predictions
+                score = q_value + 5 * hmm_prob
                 
                 if score > best_score:
                     best_score = score
@@ -242,32 +274,24 @@ class HangmanQLearningAgent:
     
     def update(self, state, action, reward, next_state, done, valid_next_actions):
         """Update Q-value using Q-learning update rule"""
-        
         current_q = self.get_q_value(state, action)
         
         if done:
-            # No future rewards if episode is done
             target_q = reward
         else:
-            # Get max Q-value for next state
             if valid_next_actions:
                 max_next_q = max([self.get_q_value(next_state, a) for a in valid_next_actions])
             else:
                 max_next_q = 0
-            
             target_q = reward + self.gamma * max_next_q
         
-        # Q-learning update
         new_q = current_q + self.alpha * (target_q - current_q)
-        
         key = self._state_to_key(state)
         self.q_table[(key, action)] = new_q
     
     def decay_epsilon(self):
         """Decay exploration rate"""
         self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
-
-
 
 
 # ============================================================================
@@ -288,7 +312,7 @@ def load_models_and_data():
     print(f"✓ Loaded agent with {len(agent.q_table)} Q-table entries")
     
     print("\nLoading test words...")
-    with open('corpus.txt', 'r') as f:
+    with open('Data/corpus.txt', 'r') as f:
         words = [line.strip().upper() for line in f if line.strip()]
     print(f"✓ Loaded {len(words)} words")
     
@@ -634,7 +658,6 @@ if __name__ == "__main__":
     hmm_models, agent, words = load_models_and_data()
     
     # Create environment
-    from_training = HangmanEnvironment  # Assumes class from training notebook
     env = HangmanEnvironment(words, hmm_models, max_lives=6)
     
     # Run evaluation
