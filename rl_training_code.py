@@ -375,7 +375,7 @@ if __name__ == "__main__":
     
     # Load training words
     print("\nLoading corpus...")
-    with open('corpus.txt', 'r') as f:
+    with open('Data/corpus.txt', 'r') as f:
         words = [line.strip().upper() for line in f if line.strip()]
     print(f"✓ Loaded {len(words)} words")
     

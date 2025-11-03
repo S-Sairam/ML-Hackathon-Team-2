@@ -59,7 +59,7 @@ class HangmanHMM:
         self.transition_probs = np.eye(word_length)
         
         # Letter pair frequencies for bigram model
-        self.bigram_counts = defaultdict(lambda: defaultdict(int))
+        self.bigram_counts = {}
         self.bigram_probs = {}
         
     def train(self, words):
@@ -77,6 +77,10 @@ class HangmanHMM:
                 
             # Build bigram counts
             for i in range(len(word) - 1):
+                if word[i] not in self.bigram_counts:
+                    self.bigram_counts[word[i]] = {}
+                if word[i+1] not in self.bigram_counts[word[i]]:
+                    self.bigram_counts[word[i]][word[i+1]] = 0
                 self.bigram_counts[word[i]][word[i+1]] += 1
         
         # Convert counts to probabilities with Laplace smoothing
@@ -94,7 +98,7 @@ class HangmanHMM:
             total = sum(self.bigram_counts[letter1].values()) + alpha * 26
             self.bigram_probs[letter1] = {}
             for letter in self.alphabet:
-                count = self.bigram_counts[letter1][letter] + alpha
+                count = self.bigram_counts[letter1].get(letter, 0) + alpha
                 self.bigram_probs[letter1][letter] = count / total
     
     def predict_letter_probs(self, masked_word, guessed_letters):
